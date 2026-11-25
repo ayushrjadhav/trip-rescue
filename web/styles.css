@@ -227,3 +227,23 @@ button[aria-pressed="true"].secondary { background: #dcebe0; }
 @media (max-width: 780px) {
   .card .action { display: flex; justify-content: center; width: 100%; }
 }
+
+.plan-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .65rem; }
+.plan-actions .hint:not(:empty) { flex-basis: 100%; }
+.saved-plan-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: .75rem 0; }
+#saved-plan { margin-bottom: .8rem; }
+#saved-plan-content textarea, .plan-actions textarea { width: 100%; min-height: 8rem; }
+
+.itinerary-risks {
+  padding: .65rem .75rem .65rem 1.85rem;
+  border: 1px solid #ebd7b8;
+  border-radius: .65rem;
+  background: #fdf7ed;
+  color: #674c25;
+  font-size: .875rem;
+}
+.itinerary-risks li + li { margin-top: .35rem; }
+
+.rail-schedule { margin: .7rem 0; }
+.rail-departure { margin-top: .65rem; padding: .65rem; background: #f4f7f3; border-radius: .65rem; }
+.rail-departure p { margin-top: .25rem; }

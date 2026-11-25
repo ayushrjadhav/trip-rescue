@@ -53,8 +53,14 @@
             <label>Arrive by<input name="arrive_by" type="datetime-local" required></label>
             <label>Maximum budget (USD)<input name="budget" type="number" min="1" step="1" value="350" required></label>
             <label class="check"><input name="checked_bag" type="checkbox"> Include a checked bag</label>
+            <label>Final destination (optional)<input name="final_destination" maxlength="100" placeholder="e.g. Manhattan"></label>
+            <label>Estimated transfer minutes<input name="transfer_minutes" type="number" min="0" max="1440"></label>
+            <label>Estimated transfer cost (USD)<input name="transfer_cost" type="number" min="0" max="10000"></label>
+            <label>Rank flights by<select name="priority"><option value="lowest_total">Lowest total</option><option value="earliest_arrival">Earliest arrival</option><option value="fewest_stops">Fewest stops</option></select></label>
+            <label>Pay up to this much more for earlier arrival (USD)<input name="extra_for_speed" type="number" min="0" max="10000"></label>
           </div>
           <p class="hint">Enter times local to each airport. Prices are for one adult.</p>
+          <p class="hint">For a final destination, enter both transfer estimates or use the built-in Manhattan estimates from JFK, LaGuardia, or Newark.</p>
           <details class="settings">
             <summary>Search settings</summary>
             <label>Flight source<select name="source"><option value="simulated">Simulated flights</option></select></label>
@@ -68,6 +74,7 @@
       <section class="results" aria-labelledby="results-heading">
         <h2 id="results-heading" tabindex="-1">Recovery options</h2>
         <div id="trip-summary" class="panel" hidden></div>
+        <details id="saved-plan" class="panel" hidden><summary>Saved recovery plan</summary><div id="saved-plan-content"></div></details>
         <p id="status" class="hint" role="status">Loading search settings…</p>
         <div id="result-loading" class="panel result-loading" aria-hidden="true" hidden>
           <div class="skeleton title"></div>

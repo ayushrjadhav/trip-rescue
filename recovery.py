@@ -83,6 +83,8 @@ class RecoveryOption:
     before_flight: GroundTransfer | None = None
     after_flight: GroundTransfer | None = None
     live_fare: LiveFare | None = None
+    last_mile: GroundTransfer | None = None
+    risks: tuple[str, ...] = ()
 
     @property
     def price_complete(self) -> bool:
@@ -90,11 +92,11 @@ class RecoveryOption:
 
     @property
     def ground_cost(self) -> int:
-        return sum(leg.cost for leg in (self.before_flight, self.after_flight) if leg)
+        return sum(leg.cost for leg in (self.before_flight, self.after_flight, self.last_mile) if leg)
 
     @property
     def final_arrival(self) -> datetime:
-        minutes = self.after_flight.minutes if self.after_flight else 0
+        minutes = sum(leg.minutes for leg in (self.after_flight, self.last_mile) if leg)
         return self.arrival + timedelta(minutes=minutes)
 
     @property

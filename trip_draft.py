@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field, StrictBool
 
 from planner import DEFAULT_MODEL, make_client
 from recovery import AIRPORTS, local_time_to_utc
+from travel_options import MANHATTAN_ESTIMATES, Priority, TravelPreferences
 
 
-class Draft(BaseModel):
+class Draft(TravelPreferences):
     origin: str | None = Field(None, max_length=3)
     destination: str | None = Field(None, max_length=3)
     ready_at: str | None = Field(None, max_length=16)
@@ -41,6 +42,11 @@ class DraftEdit(BaseModel):
     clarification: str | None
     nyc_flexible: bool | None = None
     arrival_scope: Literal["airport", "beyond_airport"] | None = None
+    final_destination: str | None = None
+    transfer_minutes: int | None = None
+    transfer_cost: int | None = None
+    priority: Priority | None = None
+    extra_for_speed: int | None = None
 
 
 QUESTIONS = {
@@ -76,6 +82,10 @@ def extract_edit(request: DraftRequest, now: datetime) -> DraftEdit | None:
                 "Set arrival_scope to airport when the traveler confirms their deadline is at the airport, "
                 "or beyond_airport if they specify a place like Manhattan. Retain a previously confirmed "
                 "scope unless explicitly changed. Leave airport-versus-city questions to the app. "
+                "Extract final_destination, transfer_minutes and transfer_cost only if stated. "
+                "For Manhattan, use the exact destination name Manhattan. For airport-only arrival, "
+                "set arrival_scope to airport. Map 'pay up to X more to get there earlier' to "
+                "earliest_arrival and extra_for_speed, and leave budget unchanged. "
                 "Give times as YYYY-MM-DDTHH:MM in the relevant airport's time zone, using the supplied "
                 "clock for relative dates. Do not infer a date or AM/PM when genuinely ambiguous. "
                 "Use USD whole dollars. Resolve relative budget changes against the existing draft. "
@@ -92,6 +102,18 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
     draft = request.draft.model_dump()
     for field, value in edit.model_dump(exclude={"clarification"}, exclude_none=True).items():
         draft[field] = value.strip() if isinstance(value, str) else value
+    if edit.priority is not None and edit.extra_for_speed is None:
+        draft["extra_for_speed"] = None
+    if edit.final_destination and edit.final_destination.casefold() != (request.draft.final_destination or "").casefold():
+        draft["transfer_minutes"] = edit.transfer_minutes
+        draft["transfer_cost"] = edit.transfer_cost
+    if edit.arrival_scope == "airport":
+        draft.update(final_destination=None, transfer_minutes=None, transfer_cost=None)
+    if draft["final_destination"] and len(draft["final_destination"]) > 100:
+        draft["final_destination"] = None
+    for field, upper in (("transfer_minutes", 1440), ("transfer_cost", 10000), ("extra_for_speed", 10000)):
+        if draft[field] is not None and not 0 <= draft[field] <= upper:
+            draft[field] = None
 
     issue = None
     choices = []
@@ -151,7 +173,14 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
         r"\bairport\b.+\b(?:manhattan|city|final destination)\b", clarification, re.IGNORECASE
     ):
         clarification = ""
-    if draft["arrival_scope"] == "beyond_airport":
+    if draft["final_destination"]:
+        preset = draft["final_destination"].casefold() == "manhattan" and (
+            destination in MANHATTAN_ESTIMATES or destination == "NYC"
+        )
+        missing = (draft["transfer_minutes"] is None, draft["transfer_cost"] is None)
+        if any(missing) and (not preset or not all(missing)):
+            clarification = "How many minutes and dollars should we allow to reach your final destination from the airport?"
+    elif draft["arrival_scope"] == "beyond_airport":
         clarification = (
             "What time should your flight reach the airport? Allow enough time afterward "
             "to get to your final destination."

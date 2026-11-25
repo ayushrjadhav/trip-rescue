@@ -113,8 +113,25 @@ def parse_offer(
     token = group.get("booking_token")
     stops = len(flights) - 1
     name = "Nonstop" if not stops else f"{stops} stop" if stops == 1 else f"{stops} stops"
+    risks = []
     if group.get("separate_tickets"):
         name += " · Separate tickets"
+        risks.append("Separate tickets. Confirm whether you need to recheck bags and what happens if you miss the connection.")
+    for incoming, outgoing in zip(flights, flights[1:]):
+        airport = incoming["arrival_airport"]["id"]
+        try:
+            gap = airport_time(outgoing["departure_airport"]["time"], airport) - airport_time(
+                incoming["arrival_airport"]["time"], airport
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+        minutes = gap // timedelta(minutes=1)
+        if minutes <= 0:
+            raise ValueError("Invalid connection timing")
+        if minutes < 60:
+            risks.append(f"{minutes}-minute connection at {airport}. Check terminals and the airline's connection guidance.")
+        if trip.checked_bag and group.get("separate_tickets") and minutes < 120:
+            risks.append(f"{minutes} minutes at {airport} may leave little time to claim and recheck your bag.")
     return RecoveryOption(
         name, (*departures, arrivals[-1]), departure, arrival, price, 0, 0,
         before_flight=route.before, after_flight=route.after,
@@ -122,6 +139,7 @@ def parse_offer(
             checked_at, search_url, token if isinstance(token, str) and token else None,
             numbers, trip.checked_bag,
         ),
+        risks=tuple(risks),
     )
 
 

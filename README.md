@@ -70,3 +70,26 @@ Airfare is shown as the provider's listed price. When you request a checked bag,
 
 - [SerpApi Google Flights API](https://serpapi.com/google-flights-api)
 - [SerpApi Google Flights Booking Options API](https://serpapi.com/google-flights-booking-options)
+
+## Standalone web app for Vercel
+
+The standalone app uses FastAPI and a browser frontend. It shares the recovery
+engine, simulator, SerpApi integration, and optional OpenAI planner with the
+Streamlit prototype. The top recommendation is the lowest verified total found.
+Live offers link to Google Flights for booking and baggage confirmation.
+
+```sh
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m uvicorn web_app:app --reload
+```
+
+Open [the local web app](http://127.0.0.1:8000). Live flights are the default
+when `SERPAPI_API_KEY` is set. The OpenAI planner is on by default when
+`OPENAI_API_KEY` is set. You can change either in **Search settings**.
+Export the keys in the terminal that starts Uvicorn, then restart it to pick
+up changes.
+
+For a Vercel preview, import this repository as a separate FastAPI project
+using the repository root. The entry point is configured in `pyproject.toml`.
+Set the provider keys as server-side Preview environment variables. Use a
+protected preview when testing with live credentials.

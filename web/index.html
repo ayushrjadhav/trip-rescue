@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7f2">
+  <title>TripRescue — Find another way there</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/trip.js"></script>
+</head>
+<body>
+  <main>
+    <header class="intro">
+      <a class="brand" href="/">TripRescue</a>
+      <h1>Find another<br>way there.</h1>
+      <p>Find a replacement flight that fits your budget and gets you there on time.</p>
+    </header>
+    <div class="workspace">
+      <section class="panel trip" aria-labelledby="trip-heading">
+        <h2 id="trip-heading">Your trip</h2>
+        <form id="trip-form">
+          <div class="fields">
+            <label>Departure airport<select name="origin" required></select></label>
+            <label>Destination airport<select name="destination" required></select></label>
+            <label>Earliest departure<input name="ready_at" type="datetime-local" required></label>
+            <label>Arrive by<input name="arrive_by" type="datetime-local" required></label>
+            <label>Maximum budget (USD)<input name="budget" type="number" min="1" step="1" value="350" required></label>
+            <label class="check"><input name="checked_bag" type="checkbox"> Include a checked bag</label>
+          </div>
+          <p class="hint">Enter times local to each airport. Prices are for one adult.</p>
+          <details class="settings">
+            <summary>Search settings</summary>
+            <label>Flight source<select name="source"><option value="simulated">Simulated flights</option></select></label>
+            <p id="source-hint" class="hint"></p>
+            <label class="check"><input name="use_model" type="checkbox" disabled> Use the OpenAI planner</label>
+            <p id="planner-hint" class="hint"></p>
+          </details>
+          <button type="submit" disabled>Find replacement flights</button>
+        </form>
+      </section>
+      <section class="results" aria-labelledby="results-heading">
+        <h2 id="results-heading" tabindex="-1">Recovery options</h2>
+        <p id="status" class="hint" role="status">Loading search settings…</p>
+        <div id="results"></div>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

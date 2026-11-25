@@ -2,7 +2,9 @@
 
 import json
 import os
+import re
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool
 
@@ -17,12 +19,15 @@ class Draft(BaseModel):
     arrive_by: str | None = Field(None, max_length=16)
     budget: int | None = Field(None, strict=True, gt=0)
     checked_bag: StrictBool | None = None
+    nyc_flexible: StrictBool = False
+    arrival_scope: Literal["airport", "beyond_airport"] | None = None
 
 
 class DraftRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     draft: Draft = Field(default_factory=Draft)
     question: str | None = Field(None, max_length=300)
+    airport_choice: str | None = Field(None, max_length=3)
 
 
 class DraftEdit(BaseModel):
@@ -33,6 +38,8 @@ class DraftEdit(BaseModel):
     budget: int | None
     checked_bag: bool | None
     clarification: str | None
+    nyc_flexible: bool | None = None
+    arrival_scope: Literal["airport", "beyond_airport"] | None = None
 
 
 QUESTIONS = {
@@ -42,6 +49,12 @@ QUESTIONS = {
     "arrive_by": "What is your latest arrival date and local time?",
     "budget": "What is your maximum budget in US dollars?",
     "checked_bag": "Will you need to check a bag?",
+}
+
+NEW_YORK_AIRPORTS = {
+    "JFK": "John F. Kennedy (JFK)",
+    "LGA": "LaGuardia (LGA)",
+    "EWR": "Newark (EWR)",
 }
 
 
@@ -55,8 +68,13 @@ def extract_edit(request: DraftRequest, now: datetime) -> DraftEdit | None:
             instructions=(
                 "Extract only explicit changes to a US flight recovery draft. Return null for "
                 "unchanged or unknown fields. Use three-letter IATA codes for unambiguous airports. "
-                "Do not guess which airport a multi-airport city refers to. Use one clarification "
+                "Do not guess which airport a multi-airport city refers to. For New York City "
+                "without a specific airport, return NYC and leave the airport-selection question to the app. Use one clarification "
                 "question for ambiguity or a city destination that requires a transfer outside airport scope. "
+                "Set nyc_flexible true only when the traveler explicitly accepts any NYC airport. "
+                "Set arrival_scope to airport when the traveler confirms their deadline is at the airport, "
+                "or beyond_airport if they specify a place like Manhattan. Retain a previously confirmed "
+                "scope unless explicitly changed. Leave airport-versus-city questions to the app. "
                 "Give times as YYYY-MM-DDTHH:MM in the relevant airport's time zone, using the supplied "
                 "clock for relative dates. Do not infer a date or AM/PM when genuinely ambiguous. "
                 "Use USD whole dollars. Resolve relative budget changes against the existing draft. "
@@ -75,13 +93,29 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
         draft[field] = value.strip() if isinstance(value, str) else value
 
     issue = None
+    choices = []
+    live_nyc = all(code in supported for code in NEW_YORK_AIRPORTS)
     for field in ("origin", "destination"):
         code = draft[field]
         if code:
             code = code.upper()
+            if field == "destination" and code == "NYC" and draft["nyc_flexible"] and live_nyc:
+                draft[field] = code
+                continue
             draft[field] = code if code in supported else None
             if draft[field] is None:
-                issue = issue or f"{code} is unavailable for this search mode. {QUESTIONS[field]}"
+                if code == "NYC":
+                    direction = "leave from" if field == "origin" else "fly into"
+                    question = f"Which New York–area airport can you {direction}?"
+                    if not issue:
+                        choices = [{"code": airport, "label": label} for airport, label in NEW_YORK_AIRPORTS.items()
+                                   if airport in supported]
+                        if field == "destination" and live_nyc:
+                            choices.append({"code": "NYC", "label": "Any NYC airport"})
+                        issue = question
+                    draft[field] = "NYC"
+                else:
+                    issue = issue or f"{code} is unavailable for this search mode. {QUESTIONS[field]}"
 
     instants = {}
     for field, airport_field in (("ready_at", "origin"), ("arrive_by", "destination")):
@@ -92,7 +126,7 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
                 local = datetime.strptime(value, "%Y-%m-%dT%H:%M")
                 draft[field] = local.isoformat(timespec="minutes")
                 if airport:
-                    instants[field] = local_time_to_utc(local, AIRPORTS[airport].zone)
+                    instants[field] = local_time_to_utc(local, AIRPORTS["LGA" if airport == "NYC" else airport].zone)
             except (ValueError, OverflowError):
                 draft[field] = None
                 issue = issue or QUESTIONS[field]
@@ -106,7 +140,27 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
 
     # A clarification takes precedence over a missing field because it explains the traveler's ambiguity.
     clarification = (edit.clarification or "").strip()[:300]
-    question = issue or clarification or next(
+    destination = draft["destination"]
+    if (
+        destination in supported and edit.arrival_scope != "beyond_airport"
+        and re.search(rf"\b{re.escape(destination)}\s+airport\b", request.message, re.IGNORECASE)
+    ):
+        draft["arrival_scope"] = "airport"
+    if draft["arrival_scope"] == "airport" and re.search(
+        r"\bairport\b.+\b(?:manhattan|city|final destination)\b", clarification, re.IGNORECASE
+    ):
+        clarification = ""
+    if draft["arrival_scope"] == "beyond_airport":
+        clarification = (
+            "What time should your flight reach the airport? Allow enough time afterward "
+            "to get to your final destination."
+        )
+        if request.question == clarification and edit.arrive_by and edit.arrival_scope is None:
+            draft["arrival_scope"] = "airport"
+            clarification = ""
+    question = issue or next(
         (prompt for field, prompt in QUESTIONS.items() if draft[field] is None), None
-    )
-    return {"draft": draft, "question": question}
+    ) or clarification or None
+    if draft["destination"] != "NYC":
+        draft["nyc_flexible"] = False
+    return {"draft": draft, "question": question, "choices": choices if not clarification else []}

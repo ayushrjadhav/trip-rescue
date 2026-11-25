@@ -16,6 +16,88 @@ let draftState = null;
 let modelAvailable = false;
 let drafting = false;
 let searching = false;
+let activeSearch = null;
+const workspace = document.querySelector('.workspace');
+const conversation = document.querySelector('#conversation');
+const choices = document.querySelector('#airport-choices');
+const summary = document.querySelector('#trip-summary');
+const transcript = [];
+const resultLoading = document.querySelector('#result-loading');
+let typingIndicator = null;
+
+function setActivity(phase = '', showChat = true) {
+  typingIndicator?.remove();
+  typingIndicator = null;
+  resultLoading.hidden = !phase;
+  agentStatus.classList.toggle('visually-hidden', Boolean(phase && showChat));
+  agentStatus.textContent = phase && showChat ? phase : '';
+  if (!phase || !showChat) return;
+  typingIndicator = element('div', undefined, 'chat-message assistant typing');
+  typingIndicator.setAttribute('aria-hidden', 'true');
+  const dots = element('span', undefined, 'typing-dots');
+  dots.append(element('i'), element('i'), element('i'));
+  typingIndicator.append(dots, element('span', phase));
+  conversation.append(typingIndicator);
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
+function setMode(mode) {
+  workspace.dataset.mode = mode;
+  document.querySelector('#chat-mode').setAttribute('aria-pressed', mode === 'chat');
+  document.querySelector('#manual-mode').setAttribute('aria-pressed', mode === 'manual');
+}
+for (const mode of ['chat', 'manual']) {
+  document.querySelector(`#${mode}-mode`).addEventListener('click', () => setMode(mode));
+}
+for (const view of ['chat', 'results']) {
+  document.querySelector(`#${view}-view`).addEventListener('click', () => {
+    workspace.dataset.view = view;
+    document.querySelector('#chat-view').setAttribute('aria-pressed', view === 'chat');
+    document.querySelector('#results-view').setAttribute('aria-pressed', view === 'results');
+  });
+}
+
+function chatMessage(role, message) {
+  transcript.push({ role, message });
+  const entry = element('div', undefined, `chat-message ${role}`);
+  entry.append(element('strong', role === 'user' ? 'You' : 'TripRescue'), element('p', message));
+  conversation.append(entry);
+  conversation.scrollTop = conversation.scrollHeight;
+}
+
+function showDraft(state) {
+  const draft = state.draft;
+  summary.replaceChildren(element('h3', 'Trip details'));
+  const origin = draft.origin || 'Departure airport needed';
+  const destination = draft.destination === 'NYC'
+    ? (draft.nyc_flexible ? 'Any NYC airport' : 'New York airport to confirm')
+    : draft.destination || 'Destination airport needed';
+  summary.append(element('p', `${origin} → ${destination}`));
+  for (const [text, value] of [['Earliest departure', draft.ready_at], ['Arrive by', draft.arrive_by]]) {
+    if (value) summary.append(element('p', `${text} · ${value.replace('T', ' ')} local`, 'hint'));
+  }
+  if (draft.budget) summary.append(element('p', `Up to ${money(draft.budget)}`, 'hint'));
+  if (draft.checked_bag !== null) summary.append(element('p', draft.checked_bag ? 'One checked bag' : 'No checked bag', 'hint'));
+  if (draft.destination === 'NYC') summary.append(element('p', 'Arrival deadline is at the airport.', 'hint'));
+  summary.hidden = false;
+  choices.replaceChildren(...(state.choices || []).map(option =>
+    action(option.label, () => sendMessage(option.label, option.code), true)));
+}
+
+document.querySelector('#reset-chat').addEventListener('click', () => {
+  if (drafting) return;
+  activeSearch?.abort();
+  draftState = null;
+  transcript.length = 0;
+  conversation.replaceChildren();
+  setActivity();
+  choices.replaceChildren();
+  summary.hidden = true;
+  results.replaceChildren();
+  status.textContent = 'Enter your trip to see the best available options.';
+  try { sessionStorage.removeItem(storageKey); } catch { /* Storage is optional. */ }
+});
+
 
 function element(tag, text, className) {
   const node = document.createElement(tag);
@@ -58,7 +140,7 @@ function card(flight, { title, note, recommended = false } = {}) {
   article.append(header, element('p', [flight.name, ...flight.flight_numbers].join(' · '), 'hint'));
   if (note) article.append(element('p', note));
   if (flight.baggage === null) {
-    article.append(element('p', 'Known total. Checked bag cost still needs confirmation.', 'warning'));
+    article.append(element('p', 'Price shown excludes the checked bag. Verify the fee before booking.', 'warning'));
   }
 
   const times = element('div', undefined, 'times');
@@ -127,8 +209,21 @@ function render(payload, trip) {
       results.append(details);
     }
   } else {
-    results.append(element('h3', payload.fallbacks.length || payload.unverified_baggage.length
-      ? 'No verified match within both limits' : 'No flights found'));
+    if (!payload.unverified_baggage.length) {
+      results.append(element('h3', payload.fallbacks.length
+        ? 'No verified match within both limits' : 'No matching flights found'));
+    }
+  }
+  if (payload.unverified_baggage.length) {
+    results.append(element('h3', 'Possible matches · Check bag fees'));
+    for (const [index, flight] of payload.unverified_baggage.entries()) {
+      results.append(card(flight, {
+        note: `Arrives on time · ${money(trip.budget - flight.total)} left for your checked bag`,
+        recommended: !best && index === 0,
+      }));
+    }
+  }
+  if (!best) {
     for (const fallback of payload.fallbacks) {
       const changes = [];
       if (fallback.extra_cost) changes.push(`Increase your budget by ${money(fallback.extra_cost)}`);
@@ -148,14 +243,6 @@ function render(payload, trip) {
       }));
       results.append(panel);
     }
-    if (payload.unverified_baggage.length) {
-      const details = element('details');
-      details.append(element('summary', 'View fares with unverified bag fees'));
-      const list = element('div', undefined, 'more');
-      list.append(...payload.unverified_baggage.map(flight => card(flight)));
-      details.append(list);
-      results.append(details);
-    }
   }
   if (payload.can_compare_all) {
     results.append(action('Compare more departures', () => search({ ...trip, compare_all: true }), true));
@@ -174,33 +261,55 @@ function render(payload, trip) {
   results.append(history);
 }
 
-async function search(trip) {
-  if (searching || drafting) return;
+async function search(trip, { fromChat = false } = {}) {
+  if (drafting) return;
+  activeSearch?.abort();
+  const controller = new AbortController();
+  activeSearch = controller;
   searching = true;
   submit.disabled = true;
-  agentButton.disabled = true;
   results.replaceChildren();
   status.textContent = 'Checking your flights. Nearby airports or next-day departures may be included.';
+  setActivity('Checking flights…', fromChat);
   results.setAttribute('aria-busy', 'true');
   try {
     const response = await fetch('/api/recover', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(trip),
+      signal: controller.signal,
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : 'Check the trip details and try again.');
+    if (controller.signal.aborted) return;
     status.textContent = payload.source === 'live'
       ? 'Live fares from Google Flights. Prices can change before booking.'
       : 'Simulated flights · For demonstration';
     render(payload, trip);
+    if (fromChat) {
+      const best = payload.matches[0];
+      chatMessage('assistant', best
+        ? `I found a flight that fits your limits. The lowest total I found is ${money(best.total)}. See Results for the details.`
+        : payload.unverified_baggage.length
+          ? `I found an on-time flight for ${money(payload.unverified_baggage[0].total)} before the bag fee. That leaves ${money(trip.budget - payload.unverified_baggage[0].total)} for your bag. Check the fee with the airline before booking.`
+          : 'I didn’t find a match within both limits. See Results for what I found, or tell me what you can change.');
+      if (draftState) saveDraft(draftState);
+    }
   } catch (error) {
+    if (controller.signal.aborted) return;
     status.textContent = 'Search unavailable';
     results.append(element('p', error.message || 'Try again in a moment.', 'warning'));
+    if (fromChat) {
+      chatMessage('assistant', `The flight search couldn’t finish. ${error.message || 'Try again in a moment.'}`);
+      if (draftState) saveDraft(draftState);
+    }
   } finally {
-    searching = false;
-    submit.disabled = false;
-    agentButton.disabled = !modelAvailable;
-    results.setAttribute('aria-busy', 'false');
-    heading.focus();
+    if (activeSearch === controller) {
+      activeSearch = null;
+      searching = false;
+      submit.disabled = drafting;
+      results.setAttribute('aria-busy', 'false');
+      if (!drafting) setActivity();
+      if (!fromChat) heading.focus();
+    }
   }
 }
 
@@ -226,7 +335,7 @@ function replaceAirportOptions() {
 
 function saveDraft(state) {
   draftState = state;
-  try { sessionStorage.setItem(storageKey, JSON.stringify(state)); } catch { /* Storage is optional. */ }
+  try { sessionStorage.setItem(storageKey, JSON.stringify({ ...state, transcript })); } catch { /* Storage is optional. */ }
 }
 
 function applyDraft(draft) {
@@ -239,6 +348,7 @@ function readDraft() {
   return {
     origin: airportCode(inputs.origin.value) || null,
     destination: airportCode(inputs.destination.value) || null,
+    nyc_flexible: Boolean(inputs.destination.value === 'NYC' && draftState?.draft.nyc_flexible),
     ready_at: inputs.ready_at.value || null,
     arrive_by: inputs.arrive_by.value || null,
     budget: Number(inputs.budget.value) || null,
@@ -252,50 +362,75 @@ inputs.checked_bag.addEventListener('change', () => {
   if (draftState) saveDraft({ ...draftState, draft: { ...draftState.draft, checked_bag: inputs.checked_bag.checked } });
 });
 
-agentForm.addEventListener('submit', async event => {
+agentForm.addEventListener('submit', event => {
   event.preventDefault();
-  if (drafting || searching || !modelAvailable) return;
-  const message = agentForm.elements.message.value.trim();
-  if (!message) return;
+  sendMessage(agentForm.elements.message.value.trim());
+});
+agentForm.elements.message.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!agentButton.disabled) agentForm.requestSubmit();
+  }
+});
+
+async function sendMessage(message, airportChoice) {
+  if (drafting || !modelAvailable || !message) return;
   const source = inputs.source.value;
+  activeSearch?.abort();
+  results.replaceChildren();
+  status.textContent = 'Updating your trip…';
   drafting = true;
   agentButton.disabled = true;
   submit.disabled = true;
-  agentStatus.textContent = 'Reading your trip details…';
+  choices.replaceChildren();
+  chatMessage('user', message);
+  agentForm.elements.message.value = '';
+  setActivity('Reading your trip details…');
+  let confirmedTrip;
   try {
     const response = await fetch('/api/trip-draft', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message, draft: draftState ? readDraft() : {}, question: draftState?.question,
-        source,
+        message, draft: draftState?.draft || {}, question: draftState?.question,
+        airport_choice: airportChoice, source,
       }),
     });
     const data = await response.json();
     if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Check your message and try again.');
-    if (inputs.source.value !== source) {
-      agentStatus.textContent = 'Flight source changed. Submit your request again for the current source.';
-      return;
-    }
+    if (inputs.source.value !== source) throw new Error('Flight source changed. Please resend your message.');
+    const reply = data.question || 'I’ll look for flights that fit your trip. Results will appear as soon as the search finishes.';
+    chatMessage('assistant', reply);
     saveDraft({ ...data, source });
     applyDraft(data.draft);
-    agentForm.elements.message.value = '';
-    agentForm.elements.message.placeholder = 'Add a detail or change a preference.';
-    agentButton.textContent = 'Update trip draft';
-    agentStatus.textContent = data.question || 'Your draft is ready. Review the trip below and select Find replacement flights.';
+    showDraft(data);
+    agentStatus.textContent = '';
+    if (data.question) {
+      status.textContent = 'I’ll search after we confirm the remaining trip details.';
+    } else {
+      confirmedTrip = { ...data.draft, source, use_model: inputs.use_model.checked };
+    }
   } catch (error) {
-    agentStatus.textContent = error.message;
+    chatMessage('assistant', error.message);
+    agentStatus.textContent = '';
+    status.textContent = 'Update your details to continue.';
+    if (draftState) {
+      showDraft(draftState);
+      saveDraft(draftState);
+    }
   } finally {
     drafting = false;
-    agentButton.disabled = false;
-    submit.disabled = false;
+    setActivity();
+    agentButton.disabled = !modelAvailable;
+    submit.disabled = searching;
   }
-});
+  if (confirmedTrip) await search(confirmedTrip, { fromChat: true });
+}
 
 form.addEventListener('submit', event => {
   event.preventDefault();
   if (drafting || searching) return;
   const draft = readDraft();
-  if (!draft.origin || !draft.destination) {
+  if (!draft.origin || draft.origin === 'NYC' || !draft.destination) {
     status.textContent = 'Choose two airports from the suggestions or enter their three-letter codes.';
     heading.focus();
     return;
@@ -315,7 +450,8 @@ async function initialize() {
     if (!response.ok) throw new Error();
     const config = await response.json();
     catalog.simulated = config.airports;
-    catalog.live = config.live_airports;
+    catalog.live = [...config.live_airports];
+    if (config.live_available) catalog.live.push({ code: 'NYC', label: 'Any NYC airport', zone: 'America/New_York' });
     for (const { code, label } of [...config.airports, ...config.live_airports]) labels.set(code, label);
     inputs.origin.value = 'ORD';
     inputs.destination.value = 'LGA';
@@ -343,8 +479,11 @@ async function initialize() {
           draftState = saved;
           if (saved.source === 'simulated' || (saved.source === 'live' && config.live_available)) inputs.source.value = saved.source;
           applyDraft(saved.draft);
-          agentButton.textContent = 'Update trip draft';
-          if (saved.question) agentStatus.textContent = saved.question;
+          for (const entry of saved.transcript || []) chatMessage(entry.role, entry.message);
+          showDraft(saved);
+          if (!saved.question && saved.draft.origin && saved.draft.destination) {
+            status.textContent = 'Continue chatting or use the form to search this trip again.';
+          }
         }
       } catch { /* An expired session does not prevent manual search. */ }
     }
@@ -353,7 +492,8 @@ async function initialize() {
       ? 'OpenAI can choose a nearby airport or next-day departure when the first search misses. It receives trip constraints and search results.'
       : 'The standard planner is active. Set OPENAI_API_KEY on the server to enable the OpenAI planner.';
     submit.disabled = false;
-    status.textContent = 'Enter your trip to see the best available options.';
+    if (!transcript.length) chatMessage('assistant', 'Tell me what changed about your flight and when you need to arrive.');
+    if (!draftState) status.textContent = 'Enter your trip to see the best available options.';
   } catch {
     status.textContent = 'Could not load search settings. Refresh the page to try again.';
   }

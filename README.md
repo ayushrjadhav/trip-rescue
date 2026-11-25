@@ -96,15 +96,18 @@ protected preview when testing with live credentials.
 
 ### Ask TripRescue and expanded live search
 
-**Ask TripRescue** uses `OPENAI_API_KEY` to turn a message into an editable draft.
-It asks about one missing or ambiguous detail at a time. Review the filled-in
-form before selecting **Find replacement flights**. Follow-up messages can
-update the draft, which stays in the current browser tab's session.
+**Ask TripRescue** uses `OPENAI_API_KEY` to guide a conversation and fill in a trip.
+It asks about one missing or ambiguous detail at a time, then searches when the
+trip is complete. The trip details and flight results appear beside the chat on
+desktop and under **Results** on mobile. Follow-up messages can revise the trip.
+The chat and draft stay in the current browser tab's session. Choose **Fill out
+the form manually** to enter or edit the details directly.
 
 The standalone app's live airport picker uses [airportsdata](https://pypi.org/project/airportsdata/)
 for U.S. IATA airports and time zones. A catalog entry does not guarantee
 scheduled service. Nearby alternatives use the app's configured transfer
 estimates. When the deadline permits it, the planner can also check departures
 from the original airports on the next local day. Each search is limited to
-four provider calls across routes and dates. The simulator retains its original
-airport list and schedule.
+four provider calls across routes and dates. **Any NYC airport** compares JFK,
+LaGuardia, and Newark for live trips and treats the deadline as arrival at the
+airport. The simulator retains its original airport list and schedule.

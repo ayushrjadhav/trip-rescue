@@ -1,2 +1,13 @@
+[project]
+name = "trip-rescue"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "openai>=2,<3",
+    "pydantic>=2,<3",
+    "requests>=2.27,<3",
+]
+
 [tool.vercel]
 entrypoint = "web_app:app"

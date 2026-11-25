@@ -74,14 +74,23 @@ function showDraft(state) {
     : draft.destination || 'Destination airport needed';
   summary.append(element('p', `${origin} → ${destination}`));
   for (const [text, value] of [['Earliest departure', draft.ready_at], ['Arrive by', draft.arrive_by]]) {
-    if (value) summary.append(element('p', `${text} · ${value.replace('T', ' ')} local`, 'hint'));
+    if (value) summary.append(element('p', `${text} · ${localTime(value + 'Z', 'UTC').replace(/ UTC$/, '')} airport local time`, 'hint'));
   }
   if (draft.budget) summary.append(element('p', `Up to ${money(draft.budget)}`, 'hint'));
   if (draft.checked_bag !== null) summary.append(element('p', draft.checked_bag ? 'One checked bag' : 'No checked bag', 'hint'));
   if (draft.destination === 'NYC') summary.append(element('p', 'Arrival deadline is at the airport.', 'hint'));
   summary.hidden = false;
+  summary.append(action('Edit trip details', () => {
+    applyDraft(draft);
+    setMode('manual');
+    inputs.origin.focus();
+  }, true));
   choices.replaceChildren(...(state.choices || []).map(option =>
     action(option.label, () => sendMessage(option.label, option.code), true)));
+  if (state.departure_correction) {
+    const label = `Use ${localTime(state.departure_correction + 'Z', 'UTC').replace(/ UTC$/, '')} airport local time`;
+    choices.append(action(label, () => sendMessage(label, undefined, true), true));
+  }
 }
 
 document.querySelector('#reset-chat').addEventListener('click', () => {
@@ -108,7 +117,7 @@ function element(tag, text, className) {
 
 function money(amount) {
   return new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: 'USD', maximumFractionDigits: 0,
+    style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 2,
   }).format(amount);
 }
 
@@ -132,7 +141,7 @@ function action(label, handle, secondary = false) {
   return button;
 }
 
-function card(flight, { title, note, recommended = false } = {}) {
+function card(flight, { title, note, recommended = false, budget, fees, refreshCompare } = {}) {
   const article = element('article', undefined, `panel card${recommended ? ' recommended' : ''}`);
   if (title) article.append(element('h3', title));
   const header = element('div', undefined, 'card-head');
@@ -141,6 +150,27 @@ function card(flight, { title, note, recommended = false } = {}) {
   if (note) article.append(element('p', note));
   if (flight.baggage === null) {
     article.append(element('p', 'Price shown excludes the checked bag. Verify the fee before booking.', 'warning'));
+    const feeLabel = element('label', 'Checked-bag fee you confirmed (USD)', 'bag-fee');
+    const fee = element('input');
+    fee.type = 'number';
+    fee.min = '0';
+    fee.step = '0.01';
+    fee.placeholder = 'Enter airline fee';
+    const updated = element('p', '', 'hint');
+    updated.setAttribute('aria-live', 'polite');
+    feeLabel.append(fee);
+    article.append(feeLabel, updated);
+    fee.addEventListener('input', () => {
+      if (!fee.value || !fee.validity.valid || !Number.isFinite(fee.valueAsNumber)) {
+        fees.delete(flight);
+        updated.textContent = '';
+      } else {
+        fees.set(flight, fee.valueAsNumber);
+        const total = Math.round((flight.total + fee.valueAsNumber) * 100) / 100;
+        updated.textContent = `${money(total)} including your bag · ${total <= budget ? 'Within budget' : money(total - budget) + ' over budget'}`;
+      }
+      refreshCompare();
+    });
   }
 
   const times = element('div', undefined, 'times');
@@ -178,7 +208,60 @@ function card(flight, { title, note, recommended = false } = {}) {
   return article;
 }
 
+function flightComparison(flights, trip, fees) {
+  const panel = element('details', undefined, 'panel flight-comparison');
+  panel.append(element('summary', 'Compare two flights'));
+  const controls = element('div', undefined, 'compare-columns');
+  const selectors = [0, 1].map(index => {
+    const label = element('label', index === 0 ? 'First flight' : 'Second flight');
+    const select = element('select');
+    flights.forEach((flight, i) => select.add(new Option(
+      `${flight.route.join(' → ')} · ${money(flight.total)} · ${localTime(flight.final_arrival, flight.destination_zone)}`, i)));
+    select.selectedIndex = index;
+    label.append(select);
+    controls.append(label);
+    return select;
+  });
+  const comparison = element('div');
+  panel.append(controls, comparison);
+  function update() {
+    const [first, second] = selectors.map(select => flights[Number(select.value)]);
+    const columns = element('div', undefined, 'compare-columns');
+    const knownTotal = flight => flight.total + (fees.get(flight) ?? 0);
+    const incomplete = flight => flight.baggage === null && !fees.has(flight);
+    for (const flight of [first, second]) {
+      const column = element('div', undefined, 'compare-flight');
+      const stops = flight.route.length - 2;
+      const transfers = flight.transfers.map(leg => `${leg.origin} → ${leg.destination} · ${minutesLabel(leg.minutes)} · ${money(leg.cost)}`);
+      column.append(
+        element('strong', flight.route.join(' → ')),
+        element('p', `${money(knownTotal(flight))}${incomplete(flight) ? ' before bag fee' : ''}`),
+        element('p', `Arrives ${localTime(flight.final_arrival, flight.destination_zone)}`),
+        element('p', stops ? `${stops} ${stops === 1 ? 'stop' : 'stops'}` : 'Nonstop'),
+        element('p', transfers.length ? transfers.join(' / ') : 'No airport transfers'),
+        element('p', incomplete(flight) ? `Bag fee unverified · ${money(trip.budget - flight.total)} left`
+          : fees.has(flight) ? `Bag fee entered · ${money(fees.get(flight))}` : 'Bag costs accounted for'),
+      );
+      columns.append(column);
+    }
+    const difference = Math.round((knownTotal(first) - knownTotal(second)) * 100) / 100;
+    const minutes = Math.round((Date.parse(first.final_arrival) - Date.parse(second.final_arrival)) / 60000);
+    const cost = difference ? `${money(Math.abs(difference))} ${difference < 0 ? 'cheaper' : 'more'}` : 'the same price';
+    const time = minutes ? `${minutesLabel(Math.abs(minutes))} ${minutes < 0 ? 'earlier' : 'later'}` : 'at the same time';
+    comparison.replaceChildren(element('p', `First flight is ${cost}${incomplete(first) || incomplete(second) ? ' at the prices shown' : ''} and arrives ${time}.`), columns);
+  }
+  selectors.forEach(select => select.addEventListener('change', update));
+  update();
+  return { panel, update };
+}
+
 function render(payload, trip) {
+  const fees = new Map();
+  const candidates = [...payload.matches, ...payload.unverified_baggage];
+  const comparison = candidates.length > 1 ? flightComparison(candidates, trip, fees) : null;
+  const flightCard = (flight, options) => card(flight, {
+    ...options, fees, budget: trip.budget, refreshCompare: () => comparison?.update(),
+  });
   if (payload.planner_error) results.append(element('p', payload.reason, 'warning'));
   const [best, ...others] = payload.matches;
   if (best) {
@@ -187,7 +270,7 @@ function render(payload, trip) {
     const timing = remaining > 0 ? `${minutesLabel(remaining)} before your deadline` : 'At your deadline';
     const unspent = trip.budget - best.total;
     const budget = unspent ? `${money(unspent)} under budget` : 'At your budget';
-    results.append(card(best, {
+    results.append(flightCard(best, {
       title: 'Recommended itinerary', note: `Lowest total found · ${timing} · ${budget}`, recommended: true,
     }));
     const fastest = others.reduce((selected, current) =>
@@ -195,7 +278,7 @@ function render(payload, trip) {
     if (fastest && new Date(fastest.final_arrival) < new Date(best.final_arrival)) {
       const earlier = Math.floor((new Date(best.final_arrival) - new Date(fastest.final_arrival)) / 60000);
       const extra = fastest.total - best.total;
-      results.append(card(fastest, {
+      results.append(flightCard(fastest, {
         title: 'Earlier arrival', note: `${minutesLabel(earlier)} earlier · ${extra ? money(extra) + ' more' : 'Same total'}`,
       }));
     }
@@ -204,7 +287,7 @@ function render(payload, trip) {
       const details = element('details');
       details.append(element('summary', `View ${remainingFlights.length} more matching ${remainingFlights.length === 1 ? 'flight' : 'flights'}`));
       const list = element('div', undefined, 'more');
-      list.append(...remainingFlights.map(flight => card(flight)));
+      list.append(...remainingFlights.map(flight => flightCard(flight)));
       details.append(list);
       results.append(details);
     }
@@ -217,7 +300,7 @@ function render(payload, trip) {
   if (payload.unverified_baggage.length) {
     results.append(element('h3', 'Possible matches · Check bag fees'));
     for (const [index, flight] of payload.unverified_baggage.entries()) {
-      results.append(card(flight, {
+      results.append(flightCard(flight, {
         note: `Arrives on time · ${money(trip.budget - flight.total)} left for your checked bag`,
         recommended: !best && index === 0,
       }));
@@ -228,7 +311,7 @@ function render(payload, trip) {
       const changes = [];
       if (fallback.extra_cost) changes.push(`Increase your budget by ${money(fallback.extra_cost)}`);
       if (fallback.extra_minutes) changes.push(`Extend your deadline by ${minutesLabel(fallback.extra_minutes)}`);
-      const panel = card(fallback.flight, { note: changes.join(' · ') });
+      const panel = flightCard(fallback.flight, { note: changes.join(' · ') });
       panel.append(action('Apply changes and search', () => {
         const updated = { ...trip, budget: fallback.budget, arrive_by: fallback.arrive_by, compare_all: true };
         for (const name of ['origin', 'destination', 'ready_at', 'arrive_by', 'budget', 'source']) {
@@ -244,6 +327,7 @@ function render(payload, trip) {
       results.append(panel);
     }
   }
+  if (comparison) results.insertBefore(comparison.panel, results.firstChild);
   if (payload.can_compare_all) {
     results.append(action('Compare more departures', () => search({ ...trip, compare_all: true }), true));
   }
@@ -292,6 +376,12 @@ async function search(trip, { fromChat = false } = {}) {
           ? `I found an on-time flight for ${money(payload.unverified_baggage[0].total)} before the bag fee. That leaves ${money(trip.budget - payload.unverified_baggage[0].total)} for your bag. Check the fee with the airline before booking.`
           : 'I didn’t find a match within both limits. See Results for what I found, or tell me what you can change.');
       if (draftState) saveDraft(draftState);
+      const view = action('View results', () => {
+        document.querySelector('#results-view').click();
+        heading.focus();
+      }, true);
+      view.classList.add('chat-results-action');
+      conversation.lastElementChild.append(view);
     }
   } catch (error) {
     if (controller.signal.aborted) return;
@@ -373,7 +463,7 @@ agentForm.elements.message.addEventListener('keydown', event => {
   }
 });
 
-async function sendMessage(message, airportChoice) {
+async function sendMessage(message, airportChoice, useSuggestedDeparture = false) {
   if (drafting || !modelAvailable || !message) return;
   const source = inputs.source.value;
   activeSearch?.abort();
@@ -392,7 +482,7 @@ async function sendMessage(message, airportChoice) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         message, draft: draftState?.draft || {}, question: draftState?.question,
-        airport_choice: airportChoice, source,
+        airport_choice: airportChoice, use_suggested_departure: useSuggestedDeparture, source,
       }),
     });
     const data = await response.json();
@@ -438,6 +528,7 @@ form.addEventListener('submit', event => {
   const values = new FormData(form);
   draft.checked_bag = values.has('checked_bag');
   saveDraft({ draft, question: null, source: values.get('source') });
+  showDraft(draftState);
   search({
     ...draft,
     source: values.get('source'), use_model: values.has('use_model'),

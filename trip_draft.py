@@ -3,7 +3,7 @@
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field, StrictBool
@@ -28,6 +28,7 @@ class DraftRequest(BaseModel):
     draft: Draft = Field(default_factory=Draft)
     question: str | None = Field(None, max_length=300)
     airport_choice: str | None = Field(None, max_length=3)
+    use_suggested_departure: StrictBool = False
 
 
 class DraftEdit(BaseModel):
@@ -87,7 +88,7 @@ def extract_edit(request: DraftRequest, now: datetime) -> DraftEdit | None:
     return response.output_parsed
 
 
-def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, str]) -> dict:
+def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, str], *, now: datetime | None = None) -> dict:
     draft = request.draft.model_dump()
     for field, value in edit.model_dump(exclude={"clarification"}, exclude_none=True).items():
         draft[field] = value.strip() if isinstance(value, str) else value
@@ -158,9 +159,26 @@ def update_draft(request: DraftRequest, edit: DraftEdit, supported: dict[str, st
         if request.question == clarification and edit.arrive_by and edit.arrival_scope is None:
             draft["arrival_scope"] = "airport"
             clarification = ""
+    correction = None
+    if now and draft["origin"] in supported and (ready := instants.get("ready_at")) and ready < now:
+        zone = AIRPORTS[draft["origin"]].zone
+        local_now = now.astimezone(zone)
+        today = datetime.combine(local_now.date(), ready.astimezone(zone).time())
+        if today.replace(tzinfo=zone) < local_now:
+            today = (local_now + timedelta(minutes=1)).replace(second=0, microsecond=0, tzinfo=None)
+        if not instants.get("arrive_by") or today.replace(tzinfo=zone) < instants["arrive_by"]:
+            correction = today.isoformat(timespec="minutes")
+        if request.use_suggested_departure and correction:
+            draft["ready_at"] = correction
+            correction = None
+            issue = None if issue == "What arrival deadline should we use? It must be after your earliest departure." else issue
+        else:
+            issue = issue or "That departure time has already passed. When can you leave?"
+
     question = issue or next(
         (prompt for field, prompt in QUESTIONS.items() if draft[field] is None), None
     ) or clarification or None
     if draft["destination"] != "NYC":
         draft["nyc_flexible"] = False
-    return {"draft": draft, "question": question, "choices": choices if not clarification else []}
+    return {"draft": draft, "question": question, "choices": choices if not clarification else [],
+            "departure_correction": correction}

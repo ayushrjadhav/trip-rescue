@@ -98,6 +98,12 @@ def trip_draft(request: WebDraftRequest):
     if not request.message.strip():
         raise HTTPException(422, "Describe what changed about your trip.")
     supported = LIVE_AIRPORTS if request.source == "live" and api_key() else SIM_AIRPORTS
+    now = datetime.now(timezone.utc)
+    live_clock = now if supported is LIVE_AIRPORTS else None
+    if request.use_suggested_departure:
+        empty = DraftEdit(origin=None, destination=None, ready_at=None, arrive_by=None,
+                          budget=None, checked_bag=None, clarification=None)
+        return update_draft(request, empty, supported, now=live_clock)
     if choice := request.airport_choice:
         field = "origin" if request.draft.origin == "NYC" else "destination"
         specific = choice in NEW_YORK_AIRPORTS and choice in supported
@@ -110,14 +116,14 @@ def trip_draft(request: WebDraftRequest):
             ready_at=None, arrive_by=None, budget=None, checked_bag=None,
             clarification=None, nyc_flexible=choice == "NYC",
         )
-        return update_draft(request, edit, supported)
+        return update_draft(request, edit, supported, now=live_clock)
     try:
-        edit = extract_edit(request, datetime.now(timezone.utc))
+        edit = extract_edit(request, now)
     except OpenAIError:
         raise HTTPException(502, "The assistant is unavailable. Try again or use the trip form.") from None
     if edit is None:
         raise HTTPException(422, "Could not read that trip request. Try including a route and deadline.")
-    return update_draft(request, edit, supported)
+    return update_draft(request, edit, supported, now=live_clock)
 
 
 def search_nyc(trip: Trip, now: datetime) -> SearchResult:
@@ -166,6 +172,8 @@ def recover(request: RecoveryRequest):
         raise HTTPException(503, "Live flights are unavailable. You can still try simulated flights.")
     if live and trip.arrive_by <= now:
         raise HTTPException(422, "Choose a future arrival deadline for live flights.")
+    if live and trip.ready_at < now.replace(second=0, microsecond=0):
+        raise HTTPException(422, "Choose an earliest departure time that has not already passed.")
     model_available = bool(os.getenv("OPENAI_API_KEY", "").strip())
     use_model = model_available if request.use_model is None else request.use_model
     if use_model and not model_available:

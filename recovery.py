@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from itertools import product
 from zoneinfo import ZoneInfo
 
@@ -108,6 +108,7 @@ class SearchResult:
     matches: list[RecoveryOption]
     routes: list[tuple[str, str]]
     reason: str
+    searched_dates: tuple[date | None, ...] = ()
     decisions: tuple[str, ...] = ()
     planner_error: bool = False
 
@@ -191,10 +192,12 @@ class SearchRoute:
     destination: str
     before: GroundTransfer | None = None
     after: GroundTransfer | None = None
+    outbound_date: date | None = None
 
     @property
     def code(self) -> str:
-        return f"{self.origin}-{self.destination}"
+        pair = f"{self.origin}-{self.destination}"
+        return f"{pair}:{self.outbound_date}" if self.outbound_date else pair
 
 
 def find_nearby_airports(trip: Trip) -> dict[str, SearchRoute]:
@@ -237,12 +240,15 @@ def search_recovery(
     *,
     include_nearby: bool = False,
     route_search: Callable[[Trip, SearchRoute], list[RecoveryOption]] = search_flights,
-    prior_routes: tuple[tuple[str, str], ...] = (),
+    prior_searches: tuple[SearchRoute, ...] = (),
     live: bool = False,
+    next_day: SearchRoute | None = None,
 ) -> SearchResult:
     """Expand the search according to the binding constraint, up to four routes."""
-    options = list(route_search(trip, SearchRoute(trip.origin, trip.destination)))
+    original = SearchRoute(trip.origin, trip.destination)
+    options = list(route_search(trip, original))
     routes = [(trip.origin, trip.destination)]
+    searched_dates = [original.outbound_date]
     matches = matching_options(trip, options)
     if matches and not include_nearby:
         return SearchResult(options, matches, routes, "Original airports meet both limits.")
@@ -271,23 +277,29 @@ def search_recovery(
         )
         return (minutes, -savings) if prioritize_time else (-savings, minutes)
 
-    previously_searched = [
-        candidates[f"{origin}-{destination}"] for origin, destination in prior_routes[1:]
-    ]
+    previously_searched = list(prior_searches)
     for route in previously_searched:
         options.extend(route_search(trip, route))
         routes.append((route.origin, route.destination))
+        searched_dates.append(route.outbound_date)
     remaining = [route for route in candidates.values() if route not in previously_searched]
-    for route in sorted(remaining, key=lambda route: priority((route.before, route.after))):
+    remaining.sort(key=lambda route: priority((route.before, route.after)))
+    if next_day and next_day not in previously_searched:
+        remaining.insert(0, next_day)
+    matches = matching_options(trip, options)
+    for route in remaining[:max(0, 4 - len(routes))]:
         options.extend(route_search(trip, route))
         routes.append((route.origin, route.destination))
+        searched_dates.append(route.outbound_date)
         matches = matching_options(trip, options)
         if matches and not include_nearby:
             break
 
-    if not candidates:
+    if next_day:
+        reason = "Checked eligible departures using a limit of four searches."
+    elif not candidates:
         reason = "TripRescue has no configured nearby airports for this route."
-    return SearchResult(options, matches, routes, reason)
+    return SearchResult(options, matches, routes, reason, searched_dates=tuple(searched_dates))
 
 
 def fallback_options(trip: Trip, options: list[RecoveryOption]) -> list[RecoveryOption]:

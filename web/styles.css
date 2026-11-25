@@ -71,3 +71,19 @@ button.secondary { background: transparent; border-color: #b6cdbf; color: #21473
 .more { display: grid; gap: .65rem; margin-top: .65rem; }
 @media (max-width: 780px) { .workspace { grid-template-columns: 1fr; } }
 @media (max-width: 410px) { .fields { grid-template-columns: 1fr; } }
+.agent { max-width: 52rem; margin-bottom: 1.5rem; background: #edf4ed; }
+.agent textarea {
+  width: 100%;
+  margin-top: .45rem;
+  padding: .65rem .75rem;
+  border: 1px solid #c8d7cd;
+  border-radius: .6rem;
+  background: #fff;
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+.agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; margin-top: .85rem; }
+.agent-actions a { color: #285b48; }
+#agent-status:not(:empty) { margin-top: .8rem; }
+.fields small { color: #50685a; font-weight: 450; overflow-wrap: anywhere; }

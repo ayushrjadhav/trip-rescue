@@ -15,13 +15,28 @@
       <h1>Find another<br>way there.</h1>
       <p>Find a replacement flight that fits your budget and gets you there on time.</p>
     </header>
+    <section class="panel agent" aria-labelledby="agent-heading">
+      <h2 id="agent-heading">Ask TripRescue</h2>
+      <form id="agent-form">
+        <label for="trip-message">What went wrong with your trip?</label>
+        <textarea id="trip-message" name="message" rows="3" maxlength="2000" required
+          placeholder="My flight from O’Hare to LaGuardia was canceled. I need to arrive by 10 AM tomorrow and can spend $450."></textarea>
+        <p class="hint">TripRescue drafts your search for you to review. Your message is sent to OpenAI.</p>
+        <div class="agent-actions">
+          <button type="submit" disabled>Draft my trip</button>
+          <a href="#trip-heading">Use the form</a>
+        </div>
+        <p id="agent-status" role="status"></p>
+      </form>
+    </section>
     <div class="workspace">
       <section class="panel trip" aria-labelledby="trip-heading">
         <h2 id="trip-heading">Your trip</h2>
         <form id="trip-form">
           <div class="fields">
-            <label>Departure airport<select name="origin" required></select></label>
-            <label>Destination airport<select name="destination" required></select></label>
+            <label>Departure airport<input name="origin" list="airport-options" placeholder="City or IATA code" required><small id="origin-airport"></small></label>
+            <label>Destination airport<input name="destination" list="airport-options" placeholder="City or IATA code" required><small id="destination-airport"></small></label>
+            <datalist id="airport-options"></datalist>
             <label>Earliest departure<input name="ready_at" type="datetime-local" required></label>
             <label>Arrive by<input name="arrive_by" type="datetime-local" required></label>
             <label>Maximum budget (USD)<input name="budget" type="number" min="1" step="1" value="350" required></label>

@@ -78,6 +78,7 @@ def record_output(messages: list, call_id: str, result) -> None:
 def estimate(route: SearchRoute, *, live: bool) -> dict:
     details = {
         "route": route.code,
+        "outbound_date": route.outbound_date.isoformat() if route.outbound_date else None,
         "departure_transfer_minutes": route.before.minutes if route.before else 0,
         "arrival_transfer_minutes": route.after.minutes if route.after else 0,
         "transfer_cost_usd": sum(leg.cost for leg in (route.before, route.after) if leg),
@@ -92,6 +93,7 @@ def estimate(route: SearchRoute, *, live: bool) -> dict:
 
 def search_with_model(
     trip: Trip, client, *, model: str = DEFAULT_MODEL, route_search=search_flights, live=False,
+    next_day: SearchRoute | None = None,
 ) -> SearchResult:
     from openai import OpenAIError
 
@@ -107,6 +109,8 @@ def search_with_model(
     routes = [(original.origin, original.destination)]
     matches = matching_options(trip, options)
     nearby = find_nearby_airports(trip)
+    if next_day:
+        nearby[next_day.code] = next_day
     if matches or not nearby:
         return search_recovery(trip, route_search=cached_search, live=live)
 
@@ -118,12 +122,13 @@ def search_with_model(
         }),
     }]
     decisions = []
+    followups = []
     try:
-        discovery = tool("find_nearby_airports", "List available airport pairs and transfer estimates.", {})
+        discovery = tool("list_search_options", "List nearby airport and next-day search options.", {})
         call_id, _ = call_tool(client, model, messages, discovery)
         record_output(messages, call_id, [estimate(route, live=live) for route in nearby.values()])
         while nearby and not matches and len(routes) < 4:
-            search = tool("search_flights", "Search one untried airport pair.", {
+            search = tool("search_flights", "Search one untried airport pair and departure date.", {
                 "route": {"type": "string", "enum": list(nearby)},
                 "reason": {"type": "string"},
             })
@@ -133,6 +138,7 @@ def search_with_model(
                 raise PlannerError("Invalid or previously searched route.")
             route = nearby.pop(code)
             found = cached_search(trip, route)
+            followups.append(route)
             options.extend(found)
             routes.append((route.origin, route.destination))
             decisions.append(f"{route.code} · {reason.strip()[:280]}")
@@ -140,7 +146,8 @@ def search_with_model(
             record_output(messages, call_id, observe(found))
     except (OpenAIError, PlannerError):
         baseline = search_recovery(
-            trip, route_search=cached_search, prior_routes=tuple(routes), live=live,
+            trip, route_search=cached_search, prior_searches=tuple(followups), live=live,
+            next_day=next_day,
         )
         return replace(
             baseline, planner_error=True, decisions=tuple(decisions),
@@ -149,13 +156,14 @@ def search_with_model(
 
     return SearchResult(
         options, matches, routes, "The model selected follow-up searches using earlier results.",
+        searched_dates=(None, *(route.outbound_date for route in followups)),
         decisions=tuple(decisions),
     )
 
 
-def run_model_planner(trip: Trip, *, route_search=search_flights, live=False) -> SearchResult:
+def run_model_planner(trip: Trip, *, route_search=search_flights, live=False, next_day=None) -> SearchResult:
     with make_client() as client:
         return search_with_model(
             trip, client, model=os.getenv("TRIPRESCUE_MODEL") or DEFAULT_MODEL,
-            route_search=route_search, live=live,
+            route_search=route_search, live=live, next_day=next_day,
         )

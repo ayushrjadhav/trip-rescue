@@ -93,3 +93,18 @@ For a Vercel preview, import this repository as a separate FastAPI project
 using the repository root. The entry point is configured in `pyproject.toml`.
 Set the provider keys as server-side Preview environment variables. Use a
 protected preview when testing with live credentials.
+
+### Ask TripRescue and expanded live search
+
+**Ask TripRescue** uses `OPENAI_API_KEY` to turn a message into an editable draft.
+It asks about one missing or ambiguous detail at a time. Review the filled-in
+form before selecting **Find replacement flights**. Follow-up messages can
+update the draft, which stays in the current browser tab's session.
+
+The standalone app's live airport picker uses [airportsdata](https://pypi.org/project/airportsdata/)
+for U.S. IATA airports and time zones. A catalog entry does not guarantee
+scheduled service. Nearby alternatives use the app's configured transfer
+estimates. When the deadline permits it, the planner can also check departures
+from the original airports on the next local day. Each search is limited to
+four provider calls across routes and dates. The simulator retains its original
+airport list and schedule.

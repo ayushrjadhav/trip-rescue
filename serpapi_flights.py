@@ -1,7 +1,7 @@
 """Read-only Google Flights searches through SerpApi."""
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 import os
 import re
 from urllib.parse import urlsplit
@@ -125,14 +125,29 @@ def parse_offer(
     )
 
 
+def earliest_departure(trip: Trip, route: SearchRoute, now: datetime) -> datetime:
+    return max(trip.ready_at, now) + timedelta(minutes=route.before.minutes if route.before else 0)
+
+
+def next_day_search(trip: Trip, now: datetime) -> SearchRoute | None:
+    original = SearchRoute(trip.origin, trip.destination)
+    zone = AIRPORTS[trip.origin].zone
+    day = earliest_departure(trip, original, now).astimezone(zone).date() + timedelta(days=1)
+    if datetime.combine(day, time.min, zone) < trip.arrive_by:
+        return SearchRoute(trip.origin, trip.destination, outbound_date=day)
+    return None
+
+
 def search_live(trip: Trip, route: SearchRoute, *, now: datetime | None = None) -> list[RecoveryOption]:
-    # Each route consumes at most one search, on its first eligible local departure date.
     now = now or datetime.now(timezone.utc)
-    earliest = max(trip.ready_at, now) + timedelta(minutes=route.before.minutes if route.before else 0)
-    local = earliest.astimezone(AIRPORTS[route.origin].zone)
+    earliest = earliest_departure(trip, route, now)
+    zone = AIRPORTS[route.origin].zone
+    local = earliest.astimezone(zone)
+    day = route.outbound_date or local.date()
     payload = request_flights(
         departure_id=route.origin, arrival_id=route.destination,
-        outbound_date=local.date().isoformat(), outbound_times=f"{local.hour},23", show_hidden="true",
+        outbound_date=day.isoformat(),
+        outbound_times=f"{local.hour if day == local.date() else 0},23", show_hidden="true",
     )
     checked_at = datetime.now(timezone.utc)
     metadata = payload.get("search_metadata") or {}
@@ -150,7 +165,10 @@ def search_live(trip: Trip, route: SearchRoute, *, now: datetime | None = None) 
             except (IndexError, KeyError, TypeError, ValueError, AttributeError):
                 continue
             parsed_count += 1
-            if option.departure >= earliest and option.departure >= checked_at:
+            if (
+                option.departure >= max(earliest, checked_at)
+                and option.departure.astimezone(zone).date() == day
+            ):
                 identity = (
                     option.route, option.departure, option.arrival,
                     option.total, option.live_fare.flight_numbers,

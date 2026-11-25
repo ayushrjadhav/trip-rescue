@@ -9,15 +9,25 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StrictBool
+from openai import OpenAIError
+
+from airport_catalog import load_airports
 
 from planner import run_model_planner
 from recovery import (
     AIRPORTS, PRIMARY_AIRPORTS, RecoveryOption, SearchRoute, Trip, fallback_options,
     find_nearby_airports, local_time_to_utc, search_recovery, validation_errors,
 )
-from serpapi_flights import FlightProviderError, api_key, search_live
+from serpapi_flights import FlightProviderError, api_key, next_day_search, search_live
+from trip_draft import DraftRequest, extract_edit, update_draft
 
 app = FastAPI(title="TripRescue")
+LIVE_AIRPORTS = load_airports()
+SIM_AIRPORTS = {code: f"{AIRPORTS[code].city} ({code})" for code in PRIMARY_AIRPORTS}
+
+
+class WebDraftRequest(DraftRequest):
+    source: Literal["simulated", "live"] = "simulated"
 
 
 class RecoveryRequest(BaseModel):
@@ -30,10 +40,6 @@ class RecoveryRequest(BaseModel):
     source: Literal["simulated", "live"] = "simulated"
     use_model: StrictBool | None = None
     compare_all: StrictBool = False
-
-
-def airport_label(code: str) -> str:
-    return f"{AIRPORTS[code].city} ({code})"
 
 
 def local_instant(value: datetime, airport: str) -> datetime:
@@ -72,15 +78,40 @@ def itinerary(option: RecoveryOption, trip: Trip) -> dict:
 @app.get("/api/config")
 def configuration():
     return {
-        "airports": [{"code": code, "label": airport_label(code)} for code in PRIMARY_AIRPORTS],
+        "airports": [
+            {"code": code, "label": label, "zone": AIRPORTS[code].zone.key}
+            for code, label in SIM_AIRPORTS.items()
+        ],
+        "live_airports": [
+            {"code": code, "label": label, "zone": AIRPORTS[code].zone.key}
+            for code, label in LIVE_AIRPORTS.items()
+        ] if api_key() else [],
         "live_available": bool(api_key()),
         "model_available": bool(os.getenv("OPENAI_API_KEY", "").strip()),
     }
 
 
+@app.post("/api/trip-draft")
+def trip_draft(request: WebDraftRequest):
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        raise HTTPException(503, "Ask TripRescue is unavailable. You can still fill in your trip below.")
+    if not request.message.strip():
+        raise HTTPException(422, "Describe what changed about your trip.")
+    supported = LIVE_AIRPORTS if request.source == "live" and api_key() else SIM_AIRPORTS
+    try:
+        edit = extract_edit(request, datetime.now(timezone.utc))
+    except OpenAIError:
+        raise HTTPException(502, "The assistant is unavailable. Try again or use the trip form.") from None
+    if edit is None:
+        raise HTTPException(422, "Could not read that trip request. Try including a route and deadline.")
+    return update_draft(request, edit, supported)
+
+
 @app.post("/api/recover")
 def recover(request: RecoveryRequest):
-    if request.origin not in PRIMARY_AIRPORTS or request.destination not in PRIMARY_AIRPORTS:
+    live = request.source == "live"
+    supported = LIVE_AIRPORTS if live else SIM_AIRPORTS
+    if request.origin not in supported or request.destination not in supported:
         raise HTTPException(422, "Choose two supported airports.")
     try:
         ready_at = local_instant(request.ready_at, request.origin)
@@ -93,7 +124,6 @@ def recover(request: RecoveryRequest):
         raise HTTPException(422, errors[0])
 
     now = datetime.now(timezone.utc)
-    live = request.source == "live"
     if live and not api_key():
         raise HTTPException(503, "Live flights are unavailable. You can still try simulated flights.")
     if live and trip.arrive_by <= now:
@@ -106,12 +136,15 @@ def recover(request: RecoveryRequest):
     def live_search(current: Trip, route: SearchRoute) -> list[RecoveryOption]:
         return search_live(current, route, now=now)
 
-    provider = {"route_search": live_search, "live": True} if live else {}
     try:
+        next_day = next_day_search(trip, now) if live else None
+        provider = {"route_search": live_search, "live": True, "next_day": next_day} if live else {}
         if use_model and not request.compare_all:
             result = run_model_planner(trip, **provider)
         else:
             result = search_recovery(trip, include_nearby=request.compare_all, **provider)
+    except OverflowError:
+        raise HTTPException(422, "Choose dates within the supported calendar range.") from None
     except FlightProviderError as error:
         raise HTTPException(502, str(error)) from None
 
@@ -142,10 +175,11 @@ def recover(request: RecoveryRequest):
         "fallbacks": fallbacks,
         "unverified_baggage": [itinerary(option, trip) for option in unverified[:5]],
         "searched": result.routes,
+        "searched_dates": result.searched_dates,
         "reason": result.reason,
         "decisions": result.decisions,
         "planner_error": result.planner_error,
-        "can_compare_all": len(result.routes) < 1 + len(find_nearby_airports(trip)),
+        "can_compare_all": len(result.routes) < min(4, 1 + len(find_nearby_airports(trip)) + bool(next_day)),
     }
 
 

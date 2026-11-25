@@ -3,3 +3,4 @@ openai>=2,<3
 requests>=2.27,<3
 fastapi>=0.115,<1
 uvicorn>=0.30,<1
+airportsdata==20261103

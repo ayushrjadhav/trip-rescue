@@ -15,11 +15,11 @@ from airport_catalog import load_airports
 
 from planner import run_model_planner
 from recovery import (
-    AIRPORTS, PRIMARY_AIRPORTS, RecoveryOption, SearchRoute, Trip, fallback_options,
-    find_nearby_airports, local_time_to_utc, search_recovery, validation_errors,
+    AIRPORTS, PRIMARY_AIRPORTS, RecoveryOption, SearchResult, SearchRoute, Trip, fallback_options,
+    find_nearby_airports, local_time_to_utc, matching_options, search_recovery, validation_errors,
 )
 from serpapi_flights import FlightProviderError, api_key, next_day_search, search_live
-from trip_draft import DraftRequest, extract_edit, update_draft
+from trip_draft import NEW_YORK_AIRPORTS, DraftEdit, DraftRequest, extract_edit, update_draft
 
 app = FastAPI(title="TripRescue")
 LIVE_AIRPORTS = load_airports()
@@ -98,6 +98,19 @@ def trip_draft(request: WebDraftRequest):
     if not request.message.strip():
         raise HTTPException(422, "Describe what changed about your trip.")
     supported = LIVE_AIRPORTS if request.source == "live" and api_key() else SIM_AIRPORTS
+    if choice := request.airport_choice:
+        field = "origin" if request.draft.origin == "NYC" else "destination"
+        specific = choice in NEW_YORK_AIRPORTS and choice in supported
+        flexible = choice == "NYC" and field == "destination" and supported is LIVE_AIRPORTS
+        if getattr(request.draft, field) != "NYC" or not (specific or flexible):
+            raise HTTPException(422, "Choose an airport from the current options.")
+        edit = DraftEdit(
+            origin=choice if field == "origin" else None,
+            destination=choice if field == "destination" else None,
+            ready_at=None, arrive_by=None, budget=None, checked_bag=None,
+            clarification=None, nyc_flexible=choice == "NYC",
+        )
+        return update_draft(request, edit, supported)
     try:
         edit = extract_edit(request, datetime.now(timezone.utc))
     except OpenAIError:
@@ -107,19 +120,44 @@ def trip_draft(request: WebDraftRequest):
     return update_draft(request, edit, supported)
 
 
+def search_nyc(trip: Trip, now: datetime) -> SearchResult:
+    destinations = [code for code in NEW_YORK_AIRPORTS if code != trip.origin and code in LIVE_AIRPORTS]
+    searches = [SearchRoute(trip.origin, code) for code in destinations]
+    options = []
+    for route in searches:
+        options.extend(search_live(trip, route, now=now))
+    matches = matching_options(trip, options)
+    if not matches and (next_day := next_day_search(trip, now)):
+        # Follow up on the airport with the lowest known fare, or JFK when there are no fares.
+        cheapest = min(options, key=lambda option: option.total, default=None)
+        route = replace(next_day, destination=cheapest.route[-1] if cheapest else destinations[0])
+        searches.append(route)
+        options.extend(search_live(trip, route, now=now))
+        matches = matching_options(trip, options)
+    return SearchResult(
+        options, matches, [(route.origin, route.destination) for route in searches],
+        "Compared New York–area airports. The deadline applies at the airport.",
+        searched_dates=tuple(route.outbound_date for route in searches),
+    )
+
+
 @app.post("/api/recover")
 def recover(request: RecoveryRequest):
     live = request.source == "live"
     supported = LIVE_AIRPORTS if live else SIM_AIRPORTS
-    if request.origin not in supported or request.destination not in supported:
+    any_nyc = live and request.destination == "NYC"
+    if request.origin not in supported or (request.destination not in supported and not any_nyc):
         raise HTTPException(422, "Choose two supported airports.")
+    destination = request.destination
+    if any_nyc:
+        destination = next(code for code in NEW_YORK_AIRPORTS if code != request.origin)
     try:
         ready_at = local_instant(request.ready_at, request.origin)
-        arrive_by = local_instant(request.arrive_by, request.destination)
+        arrive_by = local_instant(request.arrive_by, destination)
     except (OverflowError, ValueError) as error:
         raise HTTPException(422, "Choose valid airport-local dates and times.") from error
 
-    trip = Trip(request.origin, request.destination, ready_at, arrive_by, request.budget, request.checked_bag)
+    trip = Trip(request.origin, destination, ready_at, arrive_by, request.budget, request.checked_bag)
     if errors := validation_errors(trip):
         raise HTTPException(422, errors[0])
 
@@ -139,7 +177,9 @@ def recover(request: RecoveryRequest):
     try:
         next_day = next_day_search(trip, now) if live else None
         provider = {"route_search": live_search, "live": True, "next_day": next_day} if live else {}
-        if use_model and not request.compare_all:
+        if any_nyc:
+            result = search_nyc(trip, now)
+        elif use_model and not request.compare_all:
             result = run_model_planner(trip, **provider)
         else:
             result = search_recovery(trip, include_nearby=request.compare_all, **provider)
@@ -162,9 +202,9 @@ def recover(request: RecoveryRequest):
             })
 
     unverified = sorted(
-        (option for option in result.options if not option.price_complete),
+        (option for option in result.options if not option.price_complete
+         and option.total <= trip.budget and option.final_arrival <= trip.arrive_by),
         key=lambda option: (
-            option.final_arrival > trip.arrive_by, option.total > trip.budget,
             option.total, option.final_arrival,
         ),
     )
@@ -179,7 +219,7 @@ def recover(request: RecoveryRequest):
         "reason": result.reason,
         "decisions": result.decisions,
         "planner_error": result.planner_error,
-        "can_compare_all": len(result.routes) < min(4, 1 + len(find_nearby_airports(trip)) + bool(next_day)),
+        "can_compare_all": not any_nyc and len(result.routes) < min(4, 1 + len(find_nearby_airports(trip)) + bool(next_day)),
     }
 
 

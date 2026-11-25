@@ -14,22 +14,34 @@
       <a class="brand" href="/">TripRescue</a>
       <h1>Find another<br>way there.</h1>
       <p>Find a replacement flight that fits your budget and gets you there on time.</p>
+      <nav class="mode-switch" aria-label="Recovery mode">
+        <button id="chat-mode" type="button" aria-pressed="true">Chat with TripRescue</button>
+        <button id="manual-mode" type="button" class="secondary" aria-pressed="false">Fill out the form manually</button>
+      </nav>
     </header>
+    <nav class="mobile-view" aria-label="Workspace view">
+      <button id="chat-view" class="secondary" type="button" aria-pressed="true">Chat</button>
+      <button id="results-view" class="secondary" type="button" aria-pressed="false">Results</button>
+    </nav>
+    <div class="workspace" data-mode="chat" data-view="chat">
     <section class="panel agent" aria-labelledby="agent-heading">
-      <h2 id="agent-heading">Ask TripRescue</h2>
+      <header class="chat-header">
+        <div class="chat-identity"><span class="agent-mark" aria-hidden="true">TR</span><h2 id="agent-heading">Ask TripRescue</h2></div>
+        <button id="reset-chat" type="button" class="secondary">New chat</button>
+      </header>
+      <div id="conversation" class="conversation" role="log" aria-label="TripRescue conversation"></div>
+      <div id="airport-choices" class="agent-actions"></div>
       <form id="agent-form">
-        <label for="trip-message">What went wrong with your trip?</label>
-        <textarea id="trip-message" name="message" rows="3" maxlength="2000" required
-          placeholder="My flight from O’Hare to LaGuardia was canceled. I need to arrive by 10 AM tomorrow and can spend $450."></textarea>
-        <p class="hint">TripRescue drafts your search for you to review. Your message is sent to OpenAI.</p>
-        <div class="agent-actions">
-          <button type="submit" disabled>Draft my trip</button>
-          <a href="#trip-heading">Use the form</a>
+        <label class="visually-hidden" for="trip-message">Message TripRescue</label>
+        <div class="composer">
+          <textarea id="trip-message" name="message" rows="2" maxlength="2000" required
+            placeholder="Describe your trip or change a preference…"></textarea>
+          <button type="submit" disabled>Send message</button>
         </div>
+        <p class="hint">Your message is sent to OpenAI. Flight prices and availability can change.</p>
         <p id="agent-status" role="status"></p>
       </form>
     </section>
-    <div class="workspace">
       <section class="panel trip" aria-labelledby="trip-heading">
         <h2 id="trip-heading">Your trip</h2>
         <form id="trip-form">
@@ -55,7 +67,14 @@
       </section>
       <section class="results" aria-labelledby="results-heading">
         <h2 id="results-heading" tabindex="-1">Recovery options</h2>
+        <div id="trip-summary" class="panel" hidden></div>
         <p id="status" class="hint" role="status">Loading search settings…</p>
+        <div id="result-loading" class="panel result-loading" aria-hidden="true" hidden>
+          <div class="skeleton title"></div>
+          <div class="skeleton price-placeholder"></div>
+          <div class="skeleton route-placeholder"></div>
+          <div class="skeleton detail"></div>
+        </div>
         <div id="results"></div>
       </section>
     </div>
